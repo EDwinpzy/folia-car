@@ -1,0 +1,310 @@
+// src/tv/components/TvLoginOverlay.tsx
+
+import { Check, Loader2, QrCode, RefreshCw, ServerCog, UserRound } from 'lucide-react';
+import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import type { ProviderAccountSummary } from '../../types/onlineMusic';
+import { useMediaQuery } from '../../hooks/useMediaQuery';
+import { canRetryLogin } from '../../library/core/account/accountRules';
+import { LOGIN_CASE_TEXTS } from '../../components/login/window/loginCaseTexts';
+import type { TvAccountModel } from '../hooks/useTvAccount';
+import { TvOverlayCloseButton } from './TvOverlayCloseButton';
+import { dismissTvOverlayOnBackdrop } from './tvOverlayDismiss';
+
+const errorMessage = (error: unknown): string => (
+    error instanceof Error ? error.message : String(error)
+);
+
+export const TvLoginOverlay = ({
+    account,
+    startError,
+    onSwitchConfirmed,
+    onClose,
+    showCloseButton = true,
+}: {
+    account: TvAccountModel;
+    startError: string | null;
+    onSwitchConfirmed: () => void;
+    onClose?: () => void;
+    showCloseButton?: boolean;
+}) => {
+    const { t } = useTranslation();
+    const compactProviderStrip = useMediaQuery('(max-width: 600px)');
+    const [actionError, setActionError] = useState<string | null>(null);
+    const session = account.login;
+    const pendingSwitch = account.pendingSwitch;
+    const choosingMethod = session?.phase === 'choosing-method' && session.methods.length > 0;
+    const localService = session?.localService ?? null;
+    const backendFailure = localService?.available && localService.failed
+        ? {
+            title: t('login.caseLocalService', { provider: account.providerLabel }),
+            detail: localService.error,
+            restartingLabel: t('home.restartingBackend'),
+            restartLabel: t('home.restartBackend'),
+        }
+        : null;
+    const qrImageUrl = session?.codeImage ?? '';
+    const isLoadingQr = !session
+        || session.phase === 'resolving-methods'
+        || session.phase === 'loading'
+        || (!qrImageUrl && !choosingMethod && !backendFailure && !session.failure);
+    const canRetry = Boolean(session) && !backendFailure && !choosingMethod
+        && canRetryLogin(session!, Date.now());
+    const restarting = Boolean(localService?.restarting);
+    const failureTitle = session?.failure
+        ? t(LOGIN_CASE_TEXTS[session.failure.case.id].title, { provider: account.providerLabel })
+        : null;
+    const loginStatus = failureTitle
+        || (session?.phase === 'scanned' ? t('home.qrScanned') : null)
+        || (session?.phase === 'confirmed' ? t('login.readingAccount') : null)
+        || (session?.phase === 'waiting'
+            ? (session.inBrowser ? t('home.loginCodeWaiting') : t('tv.login.waiting'))
+            : null)
+        || (session?.phase === 'ready' ? t('login.openBrowser') : null)
+        || backendFailure?.title
+        || t('tv.login.waiting');
+    const retryLabel = t(session?.inBrowser ? 'home.loginBrowserRetry' : 'home.retryQr');
+
+    const selectProvider = async (provider: ProviderAccountSummary) => {
+        if (!provider.availability.configured) return;
+        setActionError(null);
+        try {
+            await account.selectProvider(provider.providerId);
+        } catch (error) {
+            setActionError(errorMessage(error));
+        }
+    };
+
+    const confirmSwitch = async () => {
+        if (!pendingSwitch) return;
+        setActionError(null);
+        try {
+            const result = await account.confirmSwitch(pendingSwitch.request.id);
+            if (result.status === 'confirmed') onSwitchConfirmed();
+        } catch (error) {
+            setActionError(errorMessage(error));
+        }
+    };
+
+    const cancelSwitch = () => {
+        if (!pendingSwitch) return;
+        setActionError(null);
+        account.cancelSwitch(pendingSwitch.request.id);
+    };
+
+    const providerStatus = (provider: ProviderAccountSummary): string => {
+        if (!provider.availability.configured) return t('home.providerNotConfigured');
+        if (provider.requiresAccount === false) return t('tv.account.noAccount');
+        if (provider.user) return provider.user.nickname || t('tv.account.signedIn');
+        return t('tv.account.notSignedIn');
+    };
+
+    const providerAction = (provider: ProviderAccountSummary): string => {
+        if (provider.providerId === account.activeProviderId) return t('tv.account.current');
+        if (provider.requiresAccount === false || provider.user) return t('tv.account.switchAction');
+        return t('tv.account.loginAction');
+    };
+
+    const resolvedTitle = session?.texts?.title
+        ? t(session.texts.title)
+        : pendingSwitch
+            ? pendingSwitch.title
+            : t('tv.account.title');
+
+    return (
+        <section
+            id="tv-layer-login"
+            data-tv-layer="login"
+            className="tv-overlay tv-login-overlay"
+            onClick={dismissTvOverlayOnBackdrop(onClose)}
+        >
+            <div
+                className="tv-overlay-panel tv-login-panel"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="tv-login-title"
+            >
+                <header className="tv-overlay-header">
+                    <div>
+                        <span className="tv-overlay-icon">
+                            {session ? <QrCode size={22} /> : <UserRound size={22} />}
+                        </span>
+                        <span>
+                            <h2 id="tv-login-title">{resolvedTitle}</h2>
+                        </span>
+                    </div>
+                    {onClose && showCloseButton && <TvOverlayCloseButton onClose={onClose} />}
+                </header>
+
+                <div className="tv-account-layout">
+                    <aside className="tv-account-providers" aria-label={t('tv.account.providers')}>
+                        <strong className="tv-account-providers-title">{t('tv.account.providers')}</strong>
+                        <div
+                            className="tv-account-provider-list"
+                            data-tv-focus-group="login-providers"
+                            data-tv-focus-axis={compactProviderStrip ? 'horizontal' : 'vertical'}
+                        >
+                            {account.providers.map(provider => {
+                                const configured = provider.availability.configured;
+                                const active = provider.providerId === account.activeProviderId;
+                                return (
+                                    <button
+                                        key={provider.providerId}
+                                        type="button"
+                                        className={`tv-provider-option${active ? ' is-active' : ''}${
+                                            provider.user ? ' is-signed-in' : ''
+                                        }`}
+                                        data-tv-focusable="true"
+                                        data-tv-focus-key={`login-provider-${provider.providerId}`}
+                                        disabled={!configured}
+                                        aria-current={active ? 'true' : undefined}
+                                        onClick={() => void selectProvider(provider)}
+                                    >
+                                        <span className="tv-provider-mark" aria-hidden="true">
+                                            {provider.shortName?.slice(0, 1)
+                                                || provider.displayName.slice(0, 1)
+                                                || '•'}
+                                        </span>
+                                        <span className="tv-provider-copy">
+                                            <strong>{provider.shortName || provider.displayName}</strong>
+                                            <small>{providerStatus(provider)}</small>
+                                        </span>
+                                        <span className="tv-provider-action">
+                                            {provider.user && <Check size={15} />}
+                                            {providerAction(provider)}
+                                        </span>
+                                    </button>
+                                );
+                            })}
+                        </div>
+                    </aside>
+
+                    <div className="tv-account-detail">
+                        {pendingSwitch ? (
+                            <div className="tv-account-pending">
+                                <span className="tv-overlay-icon"><UserRound size={24} /></span>
+                                <strong>{pendingSwitch.title}</strong>
+                                <p>{pendingSwitch.description}</p>
+                                <div
+                                    className="tv-account-pending-actions"
+                                    data-tv-focus-group="login-switch-actions"
+                                    data-tv-focus-axis="horizontal"
+                                >
+                                    <button
+                                        type="button"
+                                        data-tv-focusable="true"
+                                        data-tv-focus-key="login-switch-confirm"
+                                        onClick={() => void confirmSwitch()}
+                                    >
+                                        {t('tv.account.switchConfirm')}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        data-tv-focusable="true"
+                                        data-tv-focus-key="login-switch-cancel"
+                                        onClick={cancelSwitch}
+                                    >
+                                        {t('tv.account.switchCancel')}
+                                    </button>
+                                </div>
+                                {(actionError || startError) && (
+                                    <small className="tv-account-error">{actionError || startError}</small>
+                                )}
+                            </div>
+                        ) : choosingMethod ? (
+                            <div className="tv-login-methods">
+                                <strong>{t('home.loginMethodTitle')}</strong>
+                                <div className="tv-login-method-grid">
+                                    {session.methods.map(method => (
+                                        <button
+                                            key={method.id}
+                                            type="button"
+                                            data-tv-focusable="true"
+                                            data-tv-focus-key={`login-method-${method.id}`}
+                                            onClick={() => void account.selectLoginMethod(method.id)}
+                                        >
+                                            {t(method.labelKey)}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                        ) : session ? (
+                            <div className="tv-login-body">
+                                <div className="tv-login-qr">
+                                    {backendFailure ? (
+                                        <span className="tv-login-qr-failure">
+                                            <ServerCog size={42} />
+                                            <strong>{backendFailure.title}</strong>
+                                        </span>
+                                    ) : qrImageUrl ? (
+                                        <img src={qrImageUrl} alt="" />
+                                    ) : (
+                                        <span className="tv-login-qr-loading">
+                                            {isLoadingQr ? <Loader2 size={34} className="tv-spin" /> : <QrCode size={42} />}
+                                        </span>
+                                    )}
+                                </div>
+                                <div className="tv-login-status">
+                                    <strong>
+                                        {actionError
+                                            || startError
+                                            || loginStatus}
+                                    </strong>
+                                    {backendFailure?.detail && (
+                                        <p>{backendFailure.detail}</p>
+                                    )}
+                                    <div className="tv-login-actions">
+                                        {backendFailure && (
+                                            <button
+                                                type="button"
+                                                data-tv-focusable="true"
+                                                data-tv-focus-key="login-restart"
+                                                disabled={restarting}
+                                                onClick={() => void account.restartLoginService()}
+                                            >
+                                                {restarting ? <Loader2 size={18} className="tv-spin" /> : <ServerCog size={18} />}
+                                                {restarting ? backendFailure.restartingLabel : backendFailure.restartLabel}
+                                            </button>
+                                        )}
+                                        {canRetry && (
+                                            <button
+                                                type="button"
+                                                data-tv-focusable="true"
+                                                data-tv-focus-key="login-retry"
+                                                onClick={() => void account.retryLogin()}
+                                            >
+                                                <RefreshCw size={18} />
+                                                {retryLabel}
+                                            </button>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="tv-account-intro">
+                                <span className="tv-overlay-icon"><UserRound size={24} /></span>
+                                <strong>{account.providerLabel}</strong>
+                                {!account.isAuthenticated && account.activeProvider?.availability.configured && (
+                                    <button
+                                        type="button"
+                                        data-tv-focusable="true"
+                                        data-tv-focus-key="login-start-current"
+                                        onClick={() => {
+                                            if (account.activeProvider) void selectProvider(account.activeProvider);
+                                        }}
+                                    >
+                                        <QrCode size={18} />
+                                        {t('tv.account.loginAction')}
+                                    </button>
+                                )}
+                                {(actionError || startError) && (
+                                    <small className="tv-account-error">{actionError || startError}</small>
+                                )}
+                            </div>
+                        )}
+                    </div>
+                </div>
+            </div>
+        </section>
+    );
+};
